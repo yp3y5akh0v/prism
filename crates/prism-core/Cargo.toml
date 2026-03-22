@@ -1,0 +1,13 @@
+[package]
+name = "prism-ann"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "PRISM: Partitioned Resilient Index for Similarity with Metadata"
+
+[dependencies]
+rand = { workspace = true }
+rayon = { workspace = true }
+byteorder = { workspace = true }
+memmap2 = { workspace = true }

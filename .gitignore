@@ -1,0 +1,11 @@
+/target
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+datasets/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db

@@ -1,0 +1,22 @@
+[package]
+name = "prism-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Benchmarking harness for PRISM"
+
+[dependencies]
+prism-ann = { path = "../prism-core" }
+rand = { workspace = true }
+rayon = { workspace = true }
+byteorder = { workspace = true }
+memmap2 = { workspace = true }
+
+[[bin]]
+name = "prism-bench"
+path = "src/main.rs"
+
+[[bin]]
+name = "bench-yfcc"
+path = "src/yfcc.rs"

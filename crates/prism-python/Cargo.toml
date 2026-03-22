@@ -1,0 +1,17 @@
+[package]
+name = "prism-python"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "prism_ann"
+crate-type = ["cdylib"]
+
+[dependencies]
+prism-ann = { path = "../prism-core" }
+pyo3 = { workspace = true }
+numpy = { workspace = true }
+rayon = { workspace = true }

@@ -1,0 +1,21 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/prism-core",
+    "crates/prism-bench",
+    "crates/prism-python",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/yp3y5akh0v/prism"
+
+[workspace.dependencies]
+rand = "0.8"
+rayon = "1.10"
+byteorder = "1.5"
+memmap2 = "0.9"
+pyo3 = { version = "0.23", features = ["extension-module"] }
+numpy = "0.23"
