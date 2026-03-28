@@ -5,7 +5,7 @@
 
 use prism_ann::binary::BinaryStore;
 use prism_ann::distance;
-use prism_ann::ivf::{IvfIndex, SpMat, kmeans, sorted_intersect_u16};
+use prism_ann::ivf::{IvfIndex, QueryStore, SpMat, VecStore, kmeans, sorted_intersect_u16};
 use prism_ann::point::PointStore;
 
 use rayon::prelude::*;
@@ -92,22 +92,27 @@ fn main() {
     // K-means clustering
     println!("K-means clustering ({num_clusters} clusters, {kmeans_iters} iters)...");
     let t = Instant::now();
-    let (assignments, centroids_u8) = kmeans(&base_u8, n, dim, num_clusters, kmeans_iters);
+    let base_store = VecStore::U8(base_u8);
+    let (assignments, centroids) = kmeans(&base_store, n, dim, num_clusters, kmeans_iters);
     println!("  K-means done ({:.1}s)", t.elapsed().as_secs_f64());
 
     // Build IVF index (reorder + per-cluster tag index)
     print!("Building IVF index...");
     let t = Instant::now();
-    let ivf = IvfIndex::build(&base_u8, &base_meta, &assignments, n, dim, num_clusters);
+    let ivf = IvfIndex::build(&base_store, &base_meta, &assignments, n, dim, num_clusters);
     println!(" ({:.1}s)", t.elapsed().as_secs_f64());
 
-    drop(base_u8); // free original vectors (reordered copy in ivf)
+    drop(base_store); // free original vectors (reordered copy in ivf)
     drop(assignments);
 
     // Build binary codes from reordered vectors
     print!("Building binary codes...");
     let t = Instant::now();
-    let base_f32: Vec<f32> = ivf.vectors_u8.iter().map(|&v| v as f32).collect();
+    let vectors_u8 = match &ivf.vectors {
+        VecStore::U8(v) => v,
+        _ => unreachable!(),
+    };
+    let base_f32: Vec<f32> = vectors_u8.iter().map(|&v| v as f32).collect();
     let store = PointStore::from_parts(base_f32, dim, vec![vec![0u32; n]]);
     let binary = BinaryStore::build(&store);
     drop(store);
@@ -177,6 +182,10 @@ fn main() {
             }
 
             // Compute centroid distances only for candidate clusters
+            let centroids_u8 = match &centroids {
+                VecStore::U8(v) => v,
+                _ => unreachable!(),
+            };
             let mut cluster_dists: Vec<(usize, u32)> = candidates.iter()
                 .map(|&ci| {
                     let ci = ci as usize;
@@ -224,7 +233,7 @@ fn main() {
         for &(ef, n_probe) in &configs {
             let t = Instant::now();
             let results = ivf.batch_search_mqcb(
-                &queries_u8, nq, &query_tags, &query_binary, &query_top_clusters,
+                &QueryStore::U8(&queries_u8), nq, &query_tags, &query_binary, &query_top_clusters,
                 &binary, k, ef, n_probe, br,
             );
             let elapsed = t.elapsed().as_secs_f64();

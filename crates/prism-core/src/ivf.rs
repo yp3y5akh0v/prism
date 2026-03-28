@@ -21,10 +21,43 @@ pub struct SpMat {
     pub indices: Vec<i32>,
 }
 
+/// Type-erased flat vector storage (u8 or f32).
+pub enum VecStore {
+    U8(Vec<u8>),
+    F32(Vec<f32>),
+}
+
+/// Borrowed query batch (flat, nq × dim).
+pub enum QueryStore<'a> {
+    U8(&'a [u8]),
+    F32(&'a [f32]),
+}
+
+/// Single query vector slice.
+enum QueryVec<'a> {
+    U8(&'a [u8]),
+    F32(&'a [f32]),
+}
+
+/// Distance suitable for heap ordering. For u8: raw u32 from l2_sq8.
+/// For f32: f32::to_bits() (monotonic for non-negative IEEE 754 floats).
+#[inline]
+fn compute_dist(store: &VecStore, gid: usize, query: &QueryVec, dim: usize) -> u32 {
+    match (store, query) {
+        (VecStore::U8(v), QueryVec::U8(q)) => {
+            distance::l2_sq8(q, &v[gid * dim..(gid + 1) * dim])
+        }
+        (VecStore::F32(v), QueryVec::F32(q)) => {
+            distance::l2_squared(q, &v[gid * dim..(gid + 1) * dim]).to_bits()
+        }
+        _ => unreachable!("mismatched vector/query types"),
+    }
+}
+
 /// IVF² index: geometric clusters × per-cluster tag posting lists.
 pub struct IvfIndex {
-    /// Reordered uint8 vectors (contiguous per cluster).
-    pub vectors_u8: Vec<u8>,
+    /// Reordered vectors (contiguous per cluster).
+    pub vectors: VecStore,
     /// Mapping: reordered_id → original_id.
     pub original_ids: Vec<u32>,
     /// Cluster boundaries: cluster c spans [cluster_starts[c]..cluster_starts[c+1]).
@@ -49,7 +82,7 @@ impl IvfIndex {
     /// Reorders vectors by cluster, sorts within each cluster by most popular
     /// tag (tag-affinity sort), and builds per-cluster tag posting lists.
     pub fn build(
-        base_u8: &[u8],
+        base: &VecStore,
         base_meta: &SpMat,
         assignments: &[u16],
         n: usize,
@@ -77,52 +110,55 @@ impl IvfIndex {
         }
 
         // Reorder vectors by cluster (first pass)
-        let mut vectors_u8 = vec![0u8; n * dim];
-        for (new_id, &old_id) in new_order.iter().enumerate() {
-            let src = &base_u8[old_id as usize * dim..(old_id as usize + 1) * dim];
-            vectors_u8[new_id * dim..(new_id + 1) * dim].copy_from_slice(src);
-        }
-
-        // Sort vectors within each cluster by most popular tag so posting
-        // lists become physically contiguous (sequential access pattern).
-        {
-            let mut tag_freq = vec![0u32; base_meta.cols + 1];
-            for &tag in &base_meta.indices {
-                tag_freq[tag as usize] += 1;
-            }
-
-            for ci in 0..n_clusters {
-                let cs = cluster_starts[ci] as usize;
-                let ce = cluster_starts[ci + 1] as usize;
-                let len = ce - cs;
-                if len <= 1 {
-                    continue;
+        macro_rules! reorder_and_sort {
+            ($base_data:expr, $zero:expr, $T:ty) => {{
+                let mut vecs = vec![$zero; n * dim];
+                for (new_id, &old_id) in new_order.iter().enumerate() {
+                    let src = &$base_data[old_id as usize * dim..(old_id as usize + 1) * dim];
+                    vecs[new_id * dim..(new_id + 1) * dim].copy_from_slice(src);
                 }
 
-                let mut sort_keys: Vec<(u32, usize)> = (0..len)
-                    .map(|local| {
-                        let old_id = new_order[cs + local] as usize;
-                        let ms = base_meta.indptr[old_id] as usize;
-                        let me = base_meta.indptr[old_id + 1] as usize;
-                        let tag = base_meta.indices[ms..me]
-                            .iter()
-                            .max_by_key(|&&t| tag_freq[t as usize])
-                            .map(|&t| t as u32)
-                            .unwrap_or(u32::MAX);
-                        (tag, local)
-                    })
-                    .collect();
-                sort_keys.sort_unstable_by_key(|&(tag, _)| tag);
-
-                let old_vecs: Vec<u8> = vectors_u8[cs * dim..ce * dim].to_vec();
-                let old_ids: Vec<u32> = new_order[cs..ce].to_vec();
-                for (new_local, &(_, old_local)) in sort_keys.iter().enumerate() {
-                    vectors_u8[(cs + new_local) * dim..(cs + new_local + 1) * dim]
-                        .copy_from_slice(&old_vecs[old_local * dim..(old_local + 1) * dim]);
-                    new_order[cs + new_local] = old_ids[old_local];
+                // Tag-affinity sort within each cluster
+                let mut tag_freq = vec![0u32; base_meta.cols + 1];
+                for &tag in &base_meta.indices {
+                    tag_freq[tag as usize] += 1;
                 }
-            }
+                for ci in 0..n_clusters {
+                    let cs = cluster_starts[ci] as usize;
+                    let ce = cluster_starts[ci + 1] as usize;
+                    if ce - cs <= 1 { continue; }
+
+                    let mut sort_keys: Vec<(u32, usize)> = (0..ce - cs)
+                        .map(|local| {
+                            let old_id = new_order[cs + local] as usize;
+                            let ms = base_meta.indptr[old_id] as usize;
+                            let me = base_meta.indptr[old_id + 1] as usize;
+                            let tag = base_meta.indices[ms..me]
+                                .iter()
+                                .max_by_key(|&&t| tag_freq[t as usize])
+                                .map(|&t| t as u32)
+                                .unwrap_or(u32::MAX);
+                            (tag, local)
+                        })
+                        .collect();
+                    sort_keys.sort_unstable_by_key(|&(tag, _)| tag);
+
+                    let old_vecs: Vec<$T> = vecs[cs * dim..ce * dim].to_vec();
+                    let old_ids: Vec<u32> = new_order[cs..ce].to_vec();
+                    for (new_local, &(_, old_local)) in sort_keys.iter().enumerate() {
+                        vecs[(cs + new_local) * dim..(cs + new_local + 1) * dim]
+                            .copy_from_slice(&old_vecs[old_local * dim..(old_local + 1) * dim]);
+                        new_order[cs + new_local] = old_ids[old_local];
+                    }
+                }
+                vecs
+            }};
         }
+
+        let vectors = match base {
+            VecStore::U8(data) => VecStore::U8(reorder_and_sort!(data, 0u8, u8)),
+            VecStore::F32(data) => VecStore::F32(reorder_and_sort!(data, 0.0f32, f32)),
+        };
 
         // Build old_to_new mapping (after intra-cluster sort)
         let mut old_to_new = vec![0u32; n];
@@ -197,7 +233,7 @@ impl IvfIndex {
         }
 
         Self {
-            vectors_u8,
+            vectors,
             original_ids: new_order,
             cluster_starts,
             tag_offsets,
@@ -230,7 +266,7 @@ impl IvfIndex {
         &self,
         ci: usize,
         matching: &[u32],
-        q_u8: &[u8],
+        query: &QueryVec,
         q_binary: &[u64],
         binary: &BinaryStore,
         ef: usize,
@@ -256,16 +292,14 @@ impl IvfIndex {
             candidates.truncate(budget);
             for &(_, lid) in &candidates {
                 let gid = (cluster_base + lid as usize) as u32;
-                let v = &self.vectors_u8[gid as usize * dim..(gid as usize + 1) * dim];
-                let dist = distance::l2_sq8(q_u8, v);
+                let dist = compute_dist(&self.vectors, gid as usize, query, dim);
                 let orig_id = self.original_ids[gid as usize];
                 heap_insert(heap, dist, orig_id, ef);
             }
         } else {
             for &lid in matching {
                 let gid = (cluster_base + lid as usize) as u32;
-                let v = &self.vectors_u8[gid as usize * dim..(gid as usize + 1) * dim];
-                let dist = distance::l2_sq8(q_u8, v);
+                let dist = compute_dist(&self.vectors, gid as usize, query, dim);
                 let orig_id = self.original_ids[gid as usize];
                 heap_insert(heap, dist, orig_id, ef);
             }
@@ -279,7 +313,7 @@ impl IvfIndex {
         ci: usize,
         list_a: &[u32],
         list_b: &[u32],
-        q_u8: &[u8],
+        query: &QueryVec,
         q_binary: &[u64],
         binary: &BinaryStore,
         ef: usize,
@@ -315,8 +349,7 @@ impl IvfIndex {
                 candidates.truncate(rerank_budget);
             }
             for &(_, gid) in &candidates {
-                let v = &self.vectors_u8[gid as usize * dim..(gid as usize + 1) * dim];
-                let dist = distance::l2_sq8(q_u8, v);
+                let dist = compute_dist(&self.vectors, gid as usize, query, dim);
                 let orig_id = self.original_ids[gid as usize];
                 heap_insert(heap, dist, orig_id, ef);
             }
@@ -331,8 +364,7 @@ impl IvfIndex {
                     j += 1;
                 } else {
                     let gid = (cluster_base + a as usize) as u32;
-                    let v = &self.vectors_u8[gid as usize * dim..(gid as usize + 1) * dim];
-                    let dist = distance::l2_sq8(q_u8, v);
+                    let dist = compute_dist(&self.vectors, gid as usize, query, dim);
                     let orig_id = self.original_ids[gid as usize];
                     heap_insert(heap, dist, orig_id, ef);
                     i += 1;
@@ -346,7 +378,7 @@ impl IvfIndex {
     #[allow(clippy::too_many_arguments)]
     pub fn batch_search_mqcb(
         &self,
-        queries_u8: &[u8],
+        queries: &QueryStore,
         nq: usize,
         query_tags: &[Vec<usize>],
         query_binary: &[Vec<u64>],
@@ -392,21 +424,24 @@ impl IvfIndex {
             }
 
             qi_list.par_iter().for_each(|&qi| {
-                let q_u8 = &queries_u8[qi * dim..(qi + 1) * dim];
+                let query = match queries {
+                    QueryStore::U8(data) => QueryVec::U8(&data[qi * dim..(qi + 1) * dim]),
+                    QueryStore::F32(data) => QueryVec::F32(&data[qi * dim..(qi + 1) * dim]),
+                };
                 let tags = &query_tags[qi];
                 let heap = unsafe { heaps.get(qi) };
 
                 if tags.len() == 1 {
                     let matching = self.lookup_tag(ci, tags[0] as u32);
                     self.scan_cluster(
-                        ci, matching, q_u8, &query_binary[qi], binary,
+                        ci, matching, &query, &query_binary[qi], binary,
                         ef, binary_rerank, heap,
                     );
                 } else {
                     let list_a = self.lookup_tag(ci, tags[0] as u32);
                     let list_b = self.lookup_tag(ci, tags[1] as u32);
                     self.scan_cluster_intersect(
-                        ci, list_a, list_b, q_u8, &query_binary[qi], binary,
+                        ci, list_a, list_b, &query, &query_binary[qi], binary,
                         ef, binary_rerank, heap,
                     );
                 }
@@ -456,23 +491,33 @@ pub fn sorted_intersect_u16(a: &[u16], b: &[u16]) -> Vec<u16> {
     result
 }
 
-/// K-means clustering of uint8 vectors. Returns (assignments, centroids_u8).
+/// K-means clustering. Returns (assignments, centroids as VecStore matching input type).
 pub fn kmeans(
-    base_u8: &[u8],
+    base: &VecStore,
     n: usize,
     dim: usize,
     c: usize,
     iters: usize,
-) -> (Vec<u16>, Vec<u8>) {
+) -> (Vec<u16>, VecStore) {
     let mut rng = StdRng::seed_from_u64(42);
     let mut centroid_ids: Vec<usize> = (0..n).collect();
     centroid_ids.shuffle(&mut rng);
     centroid_ids.truncate(c);
 
     let mut centroids_f32 = vec![0.0f32; c * dim];
-    for (ci, &vid) in centroid_ids.iter().enumerate() {
-        for d in 0..dim {
-            centroids_f32[ci * dim + d] = base_u8[vid * dim + d] as f32;
+    match base {
+        VecStore::U8(data) => {
+            for (ci, &vid) in centroid_ids.iter().enumerate() {
+                for d in 0..dim {
+                    centroids_f32[ci * dim + d] = data[vid * dim + d] as f32;
+                }
+            }
+        }
+        VecStore::F32(data) => {
+            for (ci, &vid) in centroid_ids.iter().enumerate() {
+                centroids_f32[ci * dim..(ci + 1) * dim]
+                    .copy_from_slice(&data[vid * dim..(vid + 1) * dim]);
+            }
         }
     }
 
@@ -481,37 +526,62 @@ pub fn kmeans(
     for iter in 0..iters {
         let t0 = std::time::Instant::now();
 
-        let centroids_u8: Vec<u8> = centroids_f32
-            .iter()
-            .map(|&x| x.round().clamp(0.0, 255.0) as u8)
-            .collect();
-
-        let new_assignments: Vec<u16> = (0..n)
-            .into_par_iter()
-            .map(|i| {
-                let v = &base_u8[i * dim..(i + 1) * dim];
-                let mut best_c = 0u16;
-                let mut best_d = u32::MAX;
-                for ci in 0..c {
-                    let cent = &centroids_u8[ci * dim..(ci + 1) * dim];
-                    let d = distance::l2_sq8(v, cent);
-                    if d < best_d {
-                        best_d = d;
-                        best_c = ci as u16;
+        // Assignment step
+        let new_assignments: Vec<u16> = match base {
+            VecStore::U8(data) => {
+                let centroids_u8: Vec<u8> = centroids_f32
+                    .iter()
+                    .map(|&x| x.round().clamp(0.0, 255.0) as u8)
+                    .collect();
+                (0..n).into_par_iter().map(|i| {
+                    let v = &data[i * dim..(i + 1) * dim];
+                    let mut best_c = 0u16;
+                    let mut best_d = u32::MAX;
+                    for ci in 0..c {
+                        let cent = &centroids_u8[ci * dim..(ci + 1) * dim];
+                        let d = distance::l2_sq8(v, cent);
+                        if d < best_d { best_d = d; best_c = ci as u16; }
                     }
-                }
-                best_c
-            })
-            .collect();
+                    best_c
+                }).collect()
+            }
+            VecStore::F32(data) => {
+                (0..n).into_par_iter().map(|i| {
+                    let v = &data[i * dim..(i + 1) * dim];
+                    let mut best_c = 0u16;
+                    let mut best_d = f32::INFINITY;
+                    for ci in 0..c {
+                        let cent = &centroids_f32[ci * dim..(ci + 1) * dim];
+                        let d = distance::l2_squared(v, cent);
+                        if d < best_d { best_d = d; best_c = ci as u16; }
+                    }
+                    best_c
+                }).collect()
+            }
+        };
         assignments = new_assignments;
 
+        // Update step: accumulate in f64
         let mut sums = vec![0.0f64; c * dim];
         let mut counts = vec![0u32; c];
-        for i in 0..n {
-            let ci = assignments[i] as usize;
-            counts[ci] += 1;
-            for d in 0..dim {
-                sums[ci * dim + d] += base_u8[i * dim + d] as f64;
+        match base {
+            VecStore::U8(data) => {
+                for i in 0..n {
+                    let ci = assignments[i] as usize;
+                    counts[ci] += 1;
+                    for d in 0..dim {
+                        sums[ci * dim + d] += data[i * dim + d] as f64;
+                    }
+                }
+            }
+            VecStore::F32(data) => {
+                for i in 0..n {
+                    let ci = assignments[i] as usize;
+                    counts[ci] += 1;
+                    for d in 0..dim {
+                        sums[ci * dim + d] += data[i * dim + d] as f64;
+                    }
+                }
             }
         }
         for ci in 0..c {
@@ -534,10 +604,12 @@ pub fn kmeans(
         );
     }
 
-    let centroids_u8: Vec<u8> = centroids_f32
-        .iter()
-        .map(|&x| x.round().clamp(0.0, 255.0) as u8)
-        .collect();
+    let centroids = match base {
+        VecStore::U8(_) => {
+            VecStore::U8(centroids_f32.iter().map(|&x| x.round().clamp(0.0, 255.0) as u8).collect())
+        }
+        VecStore::F32(_) => VecStore::F32(centroids_f32),
+    };
 
-    (assignments, centroids_u8)
+    (assignments, centroids)
 }

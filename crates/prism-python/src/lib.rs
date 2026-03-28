@@ -332,7 +332,8 @@ impl PyIndex {
 struct PyIvfIndex {
     ivf: Option<IvfIndex>,
     binary: Option<BinaryStore>,
-    centroids_u8: Vec<u8>,
+    centroids: ivf::VecStore,
+    is_f32: bool,
     dim: usize,
     n: usize,
     n_clusters: usize,
@@ -347,7 +348,8 @@ impl PyIvfIndex {
         Self {
             ivf: None,
             binary: None,
-            centroids_u8: Vec::new(),
+            centroids: ivf::VecStore::U8(Vec::new()),
+            is_f32: false,
             dim: 0,
             n: 0,
             n_clusters,
@@ -355,16 +357,16 @@ impl PyIvfIndex {
         }
     }
 
-    /// Build IVF² index from uint8 vectors and CSR tag metadata.
+    /// Build IVF² index from vectors and CSR tag metadata.
     ///
-    /// vectors: numpy (n, dim) uint8
+    /// vectors: numpy (n, dim) uint8 or float32
     /// meta_indptr: numpy (n+1,) int64 — CSR row pointers
     /// meta_indices: numpy (nnz,) int32 — CSR column indices (tag IDs)
     /// n_tags: vocabulary size
     fn build(
         &mut self,
         py: Python<'_>,
-        vectors: PyReadonlyArray2<u8>,
+        vectors: &Bound<'_, PyAny>,
         meta_indptr: PyReadonlyArray1<i64>,
         meta_indices: PyReadonlyArray1<i32>,
         n_tags: usize,
@@ -372,11 +374,18 @@ impl PyIvfIndex {
         if self.ivf.is_some() {
             return Err(PyValueError::new_err("index already built"));
         }
-        let shape = vectors.shape();
-        let n = shape[0];
-        let dim = shape[1];
 
-        let base_u8: Vec<u8> = vectors.as_array().iter().copied().collect();
+        let (vec_store, n, dim) = if let Ok(arr) = vectors.extract::<PyReadonlyArray2<u8>>() {
+            let shape = arr.shape();
+            (ivf::VecStore::U8(arr.as_array().iter().copied().collect()), shape[0], shape[1])
+        } else if let Ok(arr) = vectors.extract::<PyReadonlyArray2<f32>>() {
+            let shape = arr.shape();
+            (ivf::VecStore::F32(arr.as_array().iter().copied().collect()), shape[0], shape[1])
+        } else {
+            return Err(PyValueError::new_err("vectors must be numpy array with dtype uint8 or float32"));
+        };
+
+        let is_f32 = matches!(&vec_store, ivf::VecStore::F32(_));
         let indptr: Vec<i64> = meta_indptr.as_array().iter().copied().collect();
         let indices: Vec<i32> = meta_indices.as_array().iter().copied().collect();
         let n_clusters = self.n_clusters;
@@ -384,19 +393,23 @@ impl PyIvfIndex {
 
         let (built_ivf, built_binary, built_centroids) = py.allow_threads(move || {
             let meta = SpMat { rows: n, cols: n_tags, indptr, indices };
-            let (assignments, centroids_u8) = ivf::kmeans(&base_u8, n, dim, n_clusters, kmeans_iters);
-            let ivf = IvfIndex::build(&base_u8, &meta, &assignments, n, dim, n_clusters);
+            let (assignments, centroids) = ivf::kmeans(&vec_store, n, dim, n_clusters, kmeans_iters);
+            let index = IvfIndex::build(&vec_store, &meta, &assignments, n, dim, n_clusters);
 
-            let base_f32: Vec<f32> = ivf.vectors_u8.iter().map(|&v| v as f32).collect();
+            let base_f32: Vec<f32> = match &index.vectors {
+                ivf::VecStore::U8(v) => v.iter().map(|&x| x as f32).collect(),
+                ivf::VecStore::F32(v) => v.clone(),
+            };
             let store = PointStore::from_parts(base_f32, dim, vec![vec![0u32; n]]);
             let binary = BinaryStore::build(&store);
 
-            (ivf, binary, centroids_u8)
+            (index, binary, centroids)
         });
 
         self.ivf = Some(built_ivf);
         self.binary = Some(built_binary);
-        self.centroids_u8 = built_centroids;
+        self.centroids = built_centroids;
+        self.is_f32 = is_f32;
         self.dim = dim;
         self.n = n;
         Ok(())
@@ -404,7 +417,7 @@ impl PyIvfIndex {
 
     /// Batch filtered search. Returns (nq, k) uint32 array of original IDs.
     ///
-    /// queries: numpy (nq, dim) uint8
+    /// queries: numpy (nq, dim) uint8 or float32
     /// filter_indptr: numpy (nq+1,) int64 — CSR row pointers
     /// filter_indices: numpy (nnz,) int32 — CSR column indices (required tag IDs)
     #[pyo3(signature = (queries, filter_indptr, filter_indices, k = 10, ef = 50, nprobe = 60, binary_rerank = 0))]
@@ -412,7 +425,7 @@ impl PyIvfIndex {
     fn search<'py>(
         &self,
         py: Python<'py>,
-        queries: PyReadonlyArray2<u8>,
+        queries: &Bound<'_, PyAny>,
         filter_indptr: PyReadonlyArray1<i64>,
         filter_indices: PyReadonlyArray1<i32>,
         k: usize,
@@ -420,23 +433,28 @@ impl PyIvfIndex {
         nprobe: usize,
         binary_rerank: usize,
     ) -> PyResult<Bound<'py, PyArray2<u32>>> {
-        let ivf = self.ivf.as_ref()
+        let ivf_ref = self.ivf.as_ref()
             .ok_or_else(|| PyValueError::new_err("index not built; call build() first"))?;
         let binary = self.binary.as_ref().unwrap();
 
-        let shape = queries.shape();
-        let nq = shape[0];
-        let dim = shape[1];
+        let (query_store, nq, dim) = if let Ok(arr) = queries.extract::<PyReadonlyArray2<u8>>() {
+            let shape = arr.shape();
+            (ivf::VecStore::U8(arr.as_array().iter().copied().collect()), shape[0], shape[1])
+        } else if let Ok(arr) = queries.extract::<PyReadonlyArray2<f32>>() {
+            let shape = arr.shape();
+            (ivf::VecStore::F32(arr.as_array().iter().copied().collect()), shape[0], shape[1])
+        } else {
+            return Err(PyValueError::new_err("queries must be numpy array with dtype uint8 or float32"));
+        };
+
         if dim != self.dim {
             return Err(PyValueError::new_err(format!(
                 "query dim {} != index dim {}", dim, self.dim
             )));
         }
 
-        let queries_u8: Vec<u8> = queries.as_array().iter().copied().collect();
         let indptr: Vec<i64> = filter_indptr.as_array().iter().copied().collect();
         let indices: Vec<i32> = filter_indices.as_array().iter().copied().collect();
-        let centroids = self.centroids_u8.clone();
 
         let results = py.allow_threads(|| {
             // Parse query tags from CSR
@@ -452,8 +470,14 @@ impl PyIvfIndex {
             let query_binary: Vec<Vec<u64>> = (0..nq)
                 .into_par_iter()
                 .map(|qi| {
-                    let q_u8 = &queries_u8[qi * dim..(qi + 1) * dim];
-                    let q_f32: Vec<f32> = q_u8.iter().map(|&v| v as f32).collect();
+                    let q_f32: Vec<f32> = match &query_store {
+                        ivf::VecStore::U8(data) => {
+                            data[qi * dim..(qi + 1) * dim].iter().map(|&v| v as f32).collect()
+                        }
+                        ivf::VecStore::F32(data) => {
+                            data[qi * dim..(qi + 1) * dim].to_vec()
+                        }
+                    };
                     binary.encode_query(&q_f32)
                 })
                 .collect();
@@ -462,21 +486,20 @@ impl PyIvfIndex {
             let query_top_clusters: Vec<Vec<usize>> = (0..nq)
                 .into_par_iter()
                 .map(|qi| {
-                    let q_u8 = &queries_u8[qi * dim..(qi + 1) * dim];
                     let tags = &query_tags[qi];
 
                     let candidates: std::borrow::Cow<[u16]> = if tags.len() == 1 {
                         let t = tags[0];
-                        if t < ivf.tag_clusters.len() {
-                            std::borrow::Cow::Borrowed(&ivf.tag_clusters[t])
+                        if t < ivf_ref.tag_clusters.len() {
+                            std::borrow::Cow::Borrowed(&ivf_ref.tag_clusters[t])
                         } else {
                             std::borrow::Cow::Owned(vec![])
                         }
                     } else if tags.len() >= 2 {
                         let t0 = tags[0];
                         let t1 = tags[1];
-                        let a = if t0 < ivf.tag_clusters.len() { &ivf.tag_clusters[t0][..] } else { &[] };
-                        let b = if t1 < ivf.tag_clusters.len() { &ivf.tag_clusters[t1][..] } else { &[] };
+                        let a = if t0 < ivf_ref.tag_clusters.len() { &ivf_ref.tag_clusters[t0][..] } else { &[] };
+                        let b = if t1 < ivf_ref.tag_clusters.len() { &ivf_ref.tag_clusters[t1][..] } else { &[] };
                         std::borrow::Cow::Owned(ivf::sorted_intersect_u16(a, b))
                     } else {
                         std::borrow::Cow::Owned(vec![])
@@ -489,8 +512,16 @@ impl PyIvfIndex {
                     let mut cluster_dists: Vec<(usize, u32)> = candidates.iter()
                         .map(|&ci| {
                             let ci = ci as usize;
-                            let cent = &centroids[ci * dim..(ci + 1) * dim];
-                            (ci, distance::l2_sq8(q_u8, cent))
+                            let dist = match (&query_store, &self.centroids) {
+                                (ivf::VecStore::U8(qd), ivf::VecStore::U8(cd)) => {
+                                    distance::l2_sq8(&qd[qi * dim..(qi + 1) * dim], &cd[ci * dim..(ci + 1) * dim])
+                                }
+                                (ivf::VecStore::F32(qd), ivf::VecStore::F32(cd)) => {
+                                    distance::l2_squared(&qd[qi * dim..(qi + 1) * dim], &cd[ci * dim..(ci + 1) * dim]).to_bits()
+                                }
+                                _ => unreachable!("mismatched query/centroid types"),
+                            };
+                            (ci, dist)
                         })
                         .collect();
 
@@ -502,8 +533,13 @@ impl PyIvfIndex {
                 })
                 .collect();
 
-            ivf.batch_search_mqcb(
-                &queries_u8, nq, &query_tags, &query_binary, &query_top_clusters,
+            let qs = match &query_store {
+                ivf::VecStore::U8(data) => ivf::QueryStore::U8(data),
+                ivf::VecStore::F32(data) => ivf::QueryStore::F32(data),
+            };
+
+            ivf_ref.batch_search_mqcb(
+                &qs, nq, &query_tags, &query_binary, &query_top_clusters,
                 binary, k, ef, nprobe, binary_rerank,
             )
         });
