@@ -9,7 +9,9 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.80"
 license = "MIT OR Apache-2.0"
+authors = ["Yuriy Peysakhov"]
 repository = "https://github.com/yp3y5akh0v/prism"
 
 [workspace.dependencies]

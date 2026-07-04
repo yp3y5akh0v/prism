@@ -2,7 +2,9 @@
 name = "prism-ann"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
+authors.workspace = true
 repository.workspace = true
 description = "PRISM: Partitioned Resilient Index for Similarity with Metadata"
 readme = "README.md"

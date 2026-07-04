@@ -13,7 +13,7 @@ use std::collections::{HashSet, VecDeque};
 
 /// Build a random d-regular graph via d/2 random permutations (Friedman model).
 fn random_regular_graph(n: usize, d: usize, rng: &mut impl Rng) -> Vec<Vec<u32>> {
-    assert!(d >= 2 && d.is_multiple_of(2));
+    assert!(d >= 2 && d % 2 == 0);
     let half = d / 2;
     let mut adj: Vec<HashSet<u32>> = vec![HashSet::new(); n];
 

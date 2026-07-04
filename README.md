@@ -9,7 +9,7 @@ Both support L2 distance, SQ8 quantization, and binary Hamming pre-filtering.
 
 ## Build
 
-Requires Rust 1.70+.
+Requires Rust 1.80+.
 
 ```
 cargo build --release -p prism-ann

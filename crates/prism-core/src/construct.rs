@@ -86,7 +86,7 @@ impl PrismIndex {
     pub fn build(store: PointStore, config: PrismConfig) -> Self {
         let n = store.len;
         assert!(n > 0, "cannot build index from empty point store");
-        assert!(config.m_random >= 4 && config.m_random.is_multiple_of(2),
+        assert!(config.m_random >= 4 && config.m_random % 2 == 0,
             "m_random must be >= 4 and even (Friedman model requires d >= 4)");
 
         let tree = PartitionTree::build(&store);
