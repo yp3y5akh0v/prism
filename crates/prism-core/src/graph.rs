@@ -21,7 +21,11 @@ impl Graph {
             offset += list.len() as u32;
         }
         offsets.push(offset);
-        Self { offsets, neighbors, n }
+        Self {
+            offsets,
+            neighbors,
+            n,
+        }
     }
 
     /// Empty graph with n nodes and no edges.
@@ -62,7 +66,9 @@ pub struct AdjBuilder {
 
 impl AdjBuilder {
     pub fn new(n: usize) -> Self {
-        Self { adj: vec![Vec::new(); n] }
+        Self {
+            adj: vec![Vec::new(); n],
+        }
     }
 
     /// Add a directed edge from `src` to `dst`.

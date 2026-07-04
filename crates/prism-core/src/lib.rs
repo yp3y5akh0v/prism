@@ -1,14 +1,14 @@
+pub mod binary;
+pub mod construct;
 pub mod distance;
 pub mod filter;
 pub mod graph;
+pub mod io;
+pub mod ivf;
 pub mod partition;
 pub mod point;
 pub mod quantize;
-pub mod binary;
-pub mod construct;
 pub mod search;
-pub mod io;
-pub mod ivf;
 
 #[cfg(test)]
 mod verify;

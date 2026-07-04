@@ -3,6 +3,7 @@
 pub enum Metric {
     L2,
     InnerProduct,
+    Cosine,
 }
 
 /// L2 squared distance between two vectors.
@@ -38,13 +39,68 @@ pub fn inner_product(a: &[f32], b: &[f32]) -> f32 {
     inner_product_scalar(a, b)
 }
 
+/// Cosine distance: `1 - (a . b) / (||a|| * ||b||)`. Returns 1.0 if either
+/// vector has zero norm (degenerate case).
+#[inline]
+pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
+    debug_assert_eq!(a.len(), b.len());
+    let mut dot = 0.0f32;
+    let mut na = 0.0f32;
+    let mut nb = 0.0f32;
+    for (&x, &y) in a.iter().zip(b.iter()) {
+        dot += x * y;
+        na += x * x;
+        nb += y * y;
+    }
+    let denom = na.sqrt() * nb.sqrt();
+    if denom == 0.0 {
+        1.0
+    } else {
+        1.0 - dot / denom
+    }
+}
+
 /// Compute distance using the given metric.
 #[inline]
 pub fn distance(a: &[f32], b: &[f32], metric: Metric) -> f32 {
     match metric {
         Metric::L2 => l2_squared(a, b),
         Metric::InnerProduct => -inner_product(a, b),
+        Metric::Cosine => cosine(a, b),
     }
+}
+
+/// Total-order u32 key for an f32: `a < b` iff `ord_key(a) < ord_key(b)`,
+/// for any sign mix. Lets exact f32 distances flow through the u32
+/// candidate heaps used for SQ8 ranking.
+#[inline]
+pub fn ord_key(x: f32) -> u32 {
+    let b = x.to_bits();
+    if b & 0x8000_0000 == 0 {
+        b | 0x8000_0000
+    } else {
+        !b
+    }
+}
+
+/// L2-normalize each `dim`-stride row in place; zero rows are left unchanged.
+pub fn normalize_rows(data: &mut [f32], dim: usize) {
+    for row in data.chunks_mut(dim) {
+        let norm = row.iter().map(|&x| x as f64 * x as f64).sum::<f64>().sqrt();
+        if norm > 0.0 {
+            let inv = (1.0 / norm) as f32;
+            for x in row {
+                *x *= inv;
+            }
+        }
+    }
+}
+
+/// L2-normalized copy of a single vector.
+pub fn normalized(v: &[f32]) -> Vec<f32> {
+    let mut out = v.to_vec();
+    normalize_rows(&mut out, v.len());
+    out
 }
 
 /// L2 squared distance between two SQ8 (u8) vectors.
@@ -89,20 +145,20 @@ unsafe fn l2_sq8_avx2(a: &[u8], b: &[u8]) -> u32 {
         let va = _mm256_loadu_si256(ap.add(i * 32) as *const __m256i);
         let vb = _mm256_loadu_si256(bp.add(i * 32) as *const __m256i);
 
-        // Low 16 bytes → 16 × i16, subtract, square-and-sum-adjacent → 8 × i32
+        // Low 16 bytes -> 16 x i16, subtract, square-and-sum-adjacent -> 8 x i32.
         let a_lo = _mm256_cvtepu8_epi16(_mm256_castsi256_si128(va));
         let b_lo = _mm256_cvtepu8_epi16(_mm256_castsi256_si128(vb));
         let diff_lo = _mm256_sub_epi16(a_lo, b_lo);
         acc = _mm256_add_epi32(acc, _mm256_madd_epi16(diff_lo, diff_lo));
 
-        // High 16 bytes → same
+        // High 16 bytes: same.
         let a_hi = _mm256_cvtepu8_epi16(_mm256_extracti128_si256(va, 1));
         let b_hi = _mm256_cvtepu8_epi16(_mm256_extracti128_si256(vb, 1));
         let diff_hi = _mm256_sub_epi16(a_hi, b_hi);
         acc = _mm256_add_epi32(acc, _mm256_madd_epi16(diff_hi, diff_hi));
     }
 
-    // Horizontal sum of 8 × i32
+    // Horizontal sum of 8 x i32.
     let hi = _mm256_extracti128_si256(acc, 1);
     let lo = _mm256_castsi256_si128(acc);
     let sum128 = _mm_add_epi32(lo, hi);
@@ -125,12 +181,11 @@ unsafe fn l2_sq8_avx2(a: &[u8], b: &[u8]) -> u32 {
 #[inline]
 pub fn hamming(a: &[u64], b: &[u64]) -> u32 {
     debug_assert_eq!(a.len(), b.len());
-    a.iter().zip(b.iter())
+    a.iter()
+        .zip(b.iter())
         .map(|(&x, &y)| (x ^ y).count_ones())
         .sum()
 }
-
-// --- Scalar fallbacks ---
 
 fn l2_squared_scalar(a: &[f32], b: &[f32]) -> f32 {
     a.iter()
@@ -145,8 +200,6 @@ fn l2_squared_scalar(a: &[f32], b: &[f32]) -> f32 {
 fn inner_product_scalar(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b.iter()).map(|(&x, &y)| x * y).sum()
 }
-
-// --- AVX2 ---
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
@@ -179,7 +232,6 @@ unsafe fn l2_squared_avx2(a: &[f32], b: &[f32]) -> f32 {
     let result = _mm_add_ss(sums, shuf2);
     let mut total = _mm_cvtss_f32(result);
 
-    // Handle remainder
     let offset = chunks * 8;
     for i in 0..remainder {
         let d = a[offset + i] - b[offset + i];
@@ -224,8 +276,6 @@ unsafe fn inner_product_avx2(a: &[f32], b: &[f32]) -> f32 {
 
     total
 }
-
-// --- SSE ---
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse")]
@@ -317,14 +367,62 @@ mod tests {
     }
 
     #[test]
+    fn ord_key_is_monotone_across_signs() {
+        let vals = [-1e9f32, -100.0, -1.5, -0.0, 0.0, 1e-10, 3.0, 1e9];
+        for w in vals.windows(2) {
+            assert!(
+                ord_key(w[0]) <= ord_key(w[1]),
+                "ord_key({}) > ord_key({})",
+                w[0],
+                w[1]
+            );
+        }
+        assert!(ord_key(-1.0) < ord_key(1.0));
+    }
+
+    #[test]
+    fn normalize_rows_unit_norms_and_zero_rows() {
+        let mut data = vec![3.0, 4.0, 0.0, 0.0, -2.0, 0.0];
+        normalize_rows(&mut data, 2);
+        assert!((data[0] - 0.6).abs() < 1e-6);
+        assert!((data[1] - 0.8).abs() < 1e-6);
+        assert_eq!(&data[2..4], &[0.0, 0.0]);
+        assert!((data[4] + 1.0).abs() < 1e-6);
+    }
+
+    #[test]
     fn test_l2_sq8_large() {
         let dim = 128;
         let a: Vec<u8> = (0..dim).map(|i| i as u8).collect();
         let b: Vec<u8> = (0..dim).map(|i| (i as u8).wrapping_add(1)).collect();
-        // Each diff = 1 (except last wraps: 127→128 vs 128→0, diff=128)
-        // First 128 elements: 127 diffs of 1 + 1 diff of |128-0|=128? No, u8 wrapping.
-        // Actually a[127]=127, b[127]=128 as u8 = 128. diff = 127-128 = -1. sq = 1.
-        // So all 128 diffs are 1. Total = 128.
+        // Every pair differs by exactly 1 (a[127]=127, b[127]=128), so the
+        // squared sum is dim = 128.
         assert_eq!(l2_sq8(&a, &b), 128);
+    }
+
+    #[test]
+    fn cosine_orthogonal_is_one() {
+        assert!((cosine(&[1.0, 0.0], &[0.0, 1.0]) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cosine_parallel_is_zero() {
+        assert!(cosine(&[1.0, 2.0, 3.0], &[2.0, 4.0, 6.0]).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cosine_antiparallel_is_two() {
+        assert!((cosine(&[1.0, 0.0], &[-1.0, 0.0]) - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cosine_zero_vector_returns_one() {
+        assert_eq!(cosine(&[0.0, 0.0, 0.0], &[1.0, 2.0, 3.0]), 1.0);
+    }
+
+    #[test]
+    fn metric_dispatch_cosine() {
+        let d = distance(&[1.0, 0.0], &[0.0, 1.0], Metric::Cosine);
+        assert!((d - 1.0).abs() < 1e-6);
     }
 }

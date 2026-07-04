@@ -5,7 +5,7 @@ Filtered vector search library with two algorithms:
 - **Index** — partitions vectors by attribute values, builds local Vamana graphs per partition, and connects them with cross-partition edges and an expander overlay. For datasets with discrete label-based filters.
 - **IvfIndex** — two-level inverted index (K-means clusters × tag posting lists) with multi-query cell batching (MQCB). For large-scale datasets with high tag cardinality.
 
-Both support L2 distance, SQ8 quantization, and binary Hamming pre-filtering.
+Both support L2, inner-product, and cosine distance, SQ8 quantization, and binary Hamming pre-filtering.
 
 ## Build
 

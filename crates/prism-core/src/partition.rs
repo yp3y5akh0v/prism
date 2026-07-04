@@ -1,4 +1,4 @@
-use crate::point::PointStore;
+use super::point::PointStore;
 
 /// A single leaf cell in the Attribute Partition Tree.
 #[derive(Clone, Debug)]
@@ -31,7 +31,7 @@ impl PartitionTree {
 
         // Determine split order: descending by cardinality
         let mut order: Vec<usize> = (0..k).collect();
-        order.sort_by(|&a, &b| store.cardinality(b).cmp(&store.cardinality(a)));
+        order.sort_by_key(|&b| std::cmp::Reverse(store.cardinality(b)));
 
         // Group points by their full attribute combination
         let mut groups: std::collections::HashMap<Vec<u32>, Vec<u32>> =
@@ -41,12 +41,19 @@ impl PartitionTree {
             groups.entry(key).or_default().push(i as u32);
         }
 
-        let cells: Vec<Cell> = groups
+        let mut cells: Vec<Cell> = groups
             .into_iter()
             .map(|(values, point_ids)| Cell { values, point_ids })
             .collect();
+        // HashMap iteration order is random per process; sort so identical
+        // data always builds identical (and byte-identical persisted) indexes.
+        cells.sort_unstable_by(|a, b| a.values.cmp(&b.values));
 
-        Self { cells, split_order: order, k }
+        Self {
+            cells,
+            split_order: order,
+            k,
+        }
     }
 
     /// Find all cells compatible with a filter.
@@ -57,9 +64,9 @@ impl PartitionTree {
             .iter()
             .enumerate()
             .filter(|(_, cell)| {
-                constraints.iter().all(|(j, allowed)| {
-                    allowed.contains(&cell.values[*j])
-                })
+                constraints
+                    .iter()
+                    .all(|(j, allowed)| allowed.contains(&cell.values[*j]))
             })
             .map(|(i, _)| i)
             .collect()
@@ -67,7 +74,10 @@ impl PartitionTree {
 
     /// Total number of points across given cell indices.
     pub fn count_points(&self, cell_indices: &[usize]) -> usize {
-        cell_indices.iter().map(|&i| self.cells[i].point_ids.len()).sum()
+        cell_indices
+            .iter()
+            .map(|&i| self.cells[i].point_ids.len())
+            .sum()
     }
 
     /// Get all point ids in the given cell indices.
@@ -88,8 +98,8 @@ impl PartitionTree {
 
 #[cfg(test)]
 mod tests {
+    use super::super::point::PointStore;
     use super::*;
-    use crate::point::PointStore;
 
     #[test]
     fn test_partition_tree() {

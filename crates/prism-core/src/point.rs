@@ -30,7 +30,12 @@ impl PointStore {
         for a in &attrs {
             debug_assert_eq!(a.len(), len);
         }
-        Self { vectors, dim, len, attrs }
+        Self {
+            vectors,
+            dim,
+            len,
+            attrs,
+        }
     }
 
     /// Number of attribute dimensions.
@@ -71,6 +76,15 @@ impl PointStore {
             seen.insert(v);
         }
         seen.len()
+    }
+}
+
+impl Drop for PointStore {
+    fn drop(&mut self) {
+        // Vectors may hold sensitive data; zero on drop so no residue
+        // outlives the store in memory.
+        use zeroize::Zeroize;
+        self.vectors.zeroize();
     }
 }
 

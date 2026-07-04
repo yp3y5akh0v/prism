@@ -1,4 +1,4 @@
-use crate::point::PointStore;
+use super::point::PointStore;
 
 /// Scalar-quantized (8-bit) vector store. 4x bandwidth reduction vs f32,
 /// identity quantization for native u8 data (SIFT, YFCC).
@@ -9,19 +9,57 @@ pub struct SQ8Store {
     dim: usize,
 }
 
+impl Drop for SQ8Store {
+    fn drop(&mut self) {
+        // Lossy 8-bit reconstructions of the vectors; zero on drop alongside the
+        // full-precision PointStore so no vector residue outlives it in memory.
+        use zeroize::Zeroize;
+        self.codes.zeroize();
+        self.mins.zeroize();
+        self.scales.zeroize();
+    }
+}
+
 impl SQ8Store {
+    /// Reassemble from persisted parts (the ANN segment decode path). Additive
+    /// to the vendored algorithm: construction semantics are untouched.
+    pub fn from_parts(codes: Vec<u8>, mins: Vec<f32>, scales: Vec<f32>, dim: usize) -> Self {
+        Self {
+            codes,
+            mins,
+            scales,
+            dim,
+        }
+    }
+
+    pub fn codes(&self) -> &[u8] {
+        &self.codes
+    }
+
+    pub fn mins(&self) -> &[f32] {
+        &self.mins
+    }
+
+    pub fn scales(&self) -> &[f32] {
+        &self.scales
+    }
+
+    pub fn dim(&self) -> usize {
+        self.dim
+    }
+
     /// Build SQ8 codes. Uses identity quantization for integer [0,255] data.
     pub fn build(store: &PointStore) -> Self {
         let n = store.len;
         let dim = store.dim;
 
-        // Identity path for u8 data
         let all_integer_byte = (0..n).all(|i| {
-            store.vector(i as u32).iter()
+            store
+                .vector(i as u32)
+                .iter()
                 .all(|&v| (0.0..=255.0).contains(&v) && v == v.round())
         });
 
-        // Lossless: direct cast
         if all_integer_byte {
             let mut codes = vec![0u8; n * dim];
             for i in 0..n {
@@ -39,16 +77,20 @@ impl SQ8Store {
             };
         }
 
-        // Percentile-clipped quantization (p0.5–p99.5)
+        // Percentile-clipped quantization (p0.5..p99.5).
         let sample_n = n.min(10_000);
-        let step = (n / sample_n).max(1);
 
         let (mins, maxs) = if sample_n >= 200 {
             let mut mins = vec![0.0f32; dim];
             let mut maxs = vec![0.0f32; dim];
             for d in 0..dim {
+                // Spread ids across the full range (a floored stride covers
+                // only a prefix when n is not a multiple of sample_n).
                 let mut sample: Vec<f32> = (0..sample_n)
-                    .map(|s| store.vector(((s * step).min(n - 1)) as u32)[d])
+                    .map(|s| {
+                        let idx = ((s as u64 * n as u64) / sample_n as u64) as usize;
+                        store.vector(idx.min(n - 1) as u32)[d]
+                    })
                     .collect();
                 sample.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
                 let lo = sample_n / 200;
@@ -75,7 +117,11 @@ impl SQ8Store {
             .zip(maxs.iter())
             .map(|(&mn, &mx)| {
                 let range = mx - mn;
-                if range > 0.0 { range / 255.0 } else { 1.0 }
+                if range > 0.0 {
+                    range / 255.0
+                } else {
+                    1.0
+                }
             })
             .collect();
 
@@ -89,7 +135,12 @@ impl SQ8Store {
             }
         }
 
-        Self { codes, mins, scales, dim }
+        Self {
+            codes,
+            mins,
+            scales,
+            dim,
+        }
     }
 
     /// Get the quantized code for point id.
@@ -118,7 +169,6 @@ mod tests {
 
     #[test]
     fn test_sq8_roundtrip() {
-        // Two points spanning [0,255] on all dims → near-identity quantization
         let store = PointStore::from_parts(
             vec![0.0, 0.0, 0.0, 255.0, 255.0, 255.0],
             3,
@@ -131,53 +181,65 @@ mod tests {
 
     #[test]
     fn test_sq8_midpoint() {
-        // Three points: min=0, mid=128, max=255 per dim
         let store = PointStore::from_parts(
             vec![0.0, 0.0, 255.0, 255.0, 128.0, 128.0],
             2,
             vec![vec![0, 0, 0]],
         );
         let sq8 = SQ8Store::build(&store);
-        // dim 0: min=0, max=255 → 128 maps to round(128/1) = 128
         assert_eq!(sq8.code(2)[0], 128);
     }
 
     #[test]
     fn test_sq8_identity_quantization() {
-        // Integer [0,255] data → identity quantization (lossless)
         let store = PointStore::from_parts(
             vec![10.0, 200.0, 50.0, 150.0, 0.0, 255.0],
             2,
             vec![vec![0, 0, 0]],
         );
         let sq8 = SQ8Store::build(&store);
-        // Identity: codes should be exact integer values
         assert_eq!(sq8.code(0), &[10, 200]);
         assert_eq!(sq8.code(1), &[50, 150]);
         assert_eq!(sq8.code(2), &[0, 255]);
-        // mins=0, scales=1 for identity
         assert_eq!(sq8.mins, vec![0.0, 0.0]);
         assert_eq!(sq8.scales, vec![1.0, 1.0]);
     }
 
     #[test]
     fn test_sq8_non_identity_for_float_data() {
-        // Float data outside [0,255] → per-dim normalization
-        let store = PointStore::from_parts(
-            vec![0.0, 0.0, 1000.0, 500.5],
-            2,
-            vec![vec![0, 0]],
-        );
+        let store = PointStore::from_parts(vec![0.0, 0.0, 1000.0, 500.5], 2, vec![vec![0, 0]]);
         let sq8 = SQ8Store::build(&store);
-        // Should NOT use identity (500.5 is not an integer, 1000 > 255)
         assert_eq!(sq8.code(0), &[0, 0]);
         assert_eq!(sq8.code(1), &[255, 255]);
     }
 
     #[test]
+    fn test_sq8_sampling_covers_tail_when_n_not_multiple_of_sample() {
+        // n = 12,500 (> 10k sample cap, not a multiple of it): the first 10k
+        // points sit in [0, 1], the last 2.5k at 100.5. A prefix-only sample
+        // would estimate the range from the old points alone.
+        let n = 12_500;
+        let mut vectors = Vec::with_capacity(n);
+        for i in 0..n {
+            if i < 10_000 {
+                vectors.push((i % 100) as f32 / 100.0 + 0.25);
+            } else {
+                vectors.push(100.5);
+            }
+        }
+        let store = PointStore::from_parts(vectors, 1, vec![vec![0; n]]);
+        let sq8 = SQ8Store::build(&store);
+        assert!(
+            sq8.scales[0] > 0.3,
+            "scale {} must reflect the tail range ~[0,100], not the prefix [0,1]",
+            sq8.scales[0]
+        );
+        assert_eq!(sq8.code((n - 1) as u32)[0], 255);
+    }
+
+    #[test]
     fn test_sq8_distance_ranking() {
-        use crate::distance;
-        // Verify SQ8 distances preserve ranking
+        use super::super::distance;
         let store = PointStore::from_parts(
             vec![0.0, 0.0, 100.0, 100.0, 200.0, 200.0],
             2,
@@ -188,7 +250,6 @@ mod tests {
         let d0 = distance::l2_sq8(&q, sq8.code(0));
         let d1 = distance::l2_sq8(&q, sq8.code(1));
         let d2 = distance::l2_sq8(&q, sq8.code(2));
-        // Point 1 (100,100) is closest to query (90,90)
         assert!(d1 < d0, "point 1 should be closer than point 0");
         assert!(d1 < d2, "point 1 should be closer than point 2");
     }

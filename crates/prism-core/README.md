@@ -12,7 +12,7 @@ Two index types:
   lists) with multi-query cell batching (MQCB). For large-scale datasets with high
   tag cardinality.
 
-Both support L2 distance, SQ8 scalar quantization, and binary Hamming pre-filtering.
+Both support L2, inner-product, and cosine distance, SQ8 scalar quantization, and binary Hamming pre-filtering.
 
 Public API: `PrismConfig`, `PrismIndex`, `PointStore`, `Filter`, `Metric`, plus the
 `ivf`, `distance`, `quantize`, and `binary` modules. See the

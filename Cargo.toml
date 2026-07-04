@@ -7,7 +7,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.80"
 license = "MIT OR Apache-2.0"
@@ -19,5 +19,6 @@ rand = "0.8"
 rayon = "1.10"
 byteorder = "1.5"
 memmap2 = "0.9"
+zeroize = "1.7"
 pyo3 = { version = "0.23", features = ["extension-module"] }
 numpy = "0.23"

@@ -16,3 +16,4 @@ rand = { workspace = true }
 rayon = { workspace = true }
 byteorder = { workspace = true }
 memmap2 = { workspace = true }
+zeroize = { workspace = true }

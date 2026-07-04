@@ -1,8 +1,7 @@
 //! Verification tests for PRISM paper lemmas and theorems.
 
 use crate::construct::{
-    PrismConfig, PrismIndex,
-    build_random_overlay, select_cross_neighbors, t_subsets, add_tuples,
+    add_tuples, build_random_overlay, select_cross_neighbors, t_subsets, PrismConfig, PrismIndex,
 };
 use crate::filter::Filter;
 use crate::graph::AdjBuilder;
@@ -52,7 +51,7 @@ fn spectral_gap(adj: &[Vec<u32>], iters: usize) -> f64 {
         return 0.0;
     }
 
-    let mut rng = rand::thread_rng();
+    let mut rng = StdRng::seed_from_u64(7);
     let mut x: Vec<f64> = (0..n).map(|_| rng.gen::<f64>() - 0.5).collect();
 
     // Orthogonalize against all-ones/sqrt(n) and normalize
@@ -193,7 +192,7 @@ fn graph_to_adj(graph: &crate::graph::Graph) -> Vec<Vec<u32>> {
 /// Build a PointStore with grid-strided synthetic attributes and random vectors.
 /// Attribute j cycles with stride = product of cardinalities[0..j].
 fn make_test_store(n: usize, dim: usize, cardinalities: &[usize]) -> PointStore {
-    let mut rng = rand::thread_rng();
+    let mut rng = StdRng::seed_from_u64(7);
     let vectors: Vec<f32> = (0..n * dim).map(|_| rng.gen::<f32>()).collect();
     let attrs: Vec<Vec<u32>> = cardinalities
         .iter()
@@ -218,7 +217,7 @@ fn bridge_formula(matching: usize, total: usize, dist: f32, radius: f32) -> f32 
 #[test]
 fn lemma_2_7_friedman_spectral_gap() {
     let n = 500;
-    let mut rng = rand::thread_rng();
+    let mut rng = StdRng::seed_from_u64(7);
 
     // d=4: bound = 2*sqrt(3) + 0.5 ~ 3.96
     let d4_bound = 2.0 * 3.0f64.sqrt() + 0.5;
@@ -230,7 +229,10 @@ fn lemma_2_7_friedman_spectral_gap() {
             d4_pass += 1;
         }
     }
-    assert!(d4_pass >= 8, "d=4: only {d4_pass}/10 trials <= {d4_bound:.2}");
+    assert!(
+        d4_pass >= 8,
+        "d=4: only {d4_pass}/10 trials <= {d4_bound:.2}"
+    );
 
     // d=8: bound = 2*sqrt(7) + 0.5 ~ 5.79
     let d8_bound = 2.0 * 7.0f64.sqrt() + 0.5;
@@ -242,7 +244,10 @@ fn lemma_2_7_friedman_spectral_gap() {
             d8_pass += 1;
         }
     }
-    assert!(d8_pass >= 8, "d=8: only {d8_pass}/10 trials <= {d8_bound:.2}");
+    assert!(
+        d8_pass >= 8,
+        "d=8: only {d8_pass}/10 trials <= {d8_bound:.2}"
+    );
 }
 
 /// Lemma 2.8(i): Expander Mixing Lemma edge count lower bound.
@@ -251,7 +256,7 @@ fn lemma_2_7_friedman_spectral_gap() {
 fn lemma_2_8i_edge_count() {
     let n = 500;
     let d = 8;
-    let mut rng = rand::thread_rng();
+    let mut rng = StdRng::seed_from_u64(7);
     let adj = random_regular_graph(n, d, &mut rng);
     let lambda = spectral_gap(&adj, 300);
 
@@ -281,7 +286,7 @@ fn lemma_2_8i_edge_count() {
 fn lemma_2_8ii_giant_component() {
     let n = 1000;
     let d = 8;
-    let mut rng = rand::thread_rng();
+    let mut rng = StdRng::seed_from_u64(7);
     let adj = random_regular_graph(n, d, &mut rng);
     // Use conservative lambda: inflate by 10% to account for power iteration underestimate
     let lambda_raw = spectral_gap(&adj, 300);
@@ -365,7 +370,7 @@ fn theorem_6_6_case1_single_attr_survival() {
         ..Default::default()
     };
     let subsets_t1 = t_subsets(k, 1);
-    let mut rng = rand::thread_rng();
+    let mut rng = StdRng::seed_from_u64(7);
 
     for _ in 0..50 {
         let p = rng.gen_range(0..n as u32);
@@ -457,7 +462,7 @@ fn theorem_6_6_case2_covering_array() {
         }
     }
 
-    let mut rng = rand::thread_rng();
+    let mut rng = StdRng::seed_from_u64(7);
     for _ in 0..50 {
         let p = rng.gen_range(0..n as u32);
         let p_vec = store.vector(p);
@@ -497,7 +502,7 @@ fn theorem_4_1_coverage_guarantee() {
     };
     let subsets = t_subsets(k, t);
     let ratio_bound = 1.0 - 1.0 / std::f64::consts::E; // ~ 0.632
-    let mut rng = rand::thread_rng();
+    let mut rng = StdRng::seed_from_u64(7);
 
     for _ in 0..20 {
         let p = rng.gen_range(0..n as u32);
@@ -537,7 +542,7 @@ fn lemma_3_6_submodularity() {
     let t = 2;
     let subsets = t_subsets(k, t);
 
-    let mut rng = rand::thread_rng();
+    let mut rng = StdRng::seed_from_u64(7);
     let all_ids: Vec<u32> = (0..n as u32).collect();
 
     for trial in 0..100 {
@@ -584,7 +589,10 @@ fn definition_5_1_bridge_score() {
 
     // Exact: (3/6) * (1/(1 + 2/4)) = 0.5 * 2/3 = 1/3
     let score = bridge_formula(3, 6, 2.0, 4.0);
-    assert!((score - 1.0 / 3.0).abs() < 1e-6, "expected 1/3, got {score}");
+    assert!(
+        (score - 1.0 / 3.0).abs() < 1e-6,
+        "expected 1/3, got {score}"
+    );
 
     // Zero matching -> zero score
     assert_eq!(bridge_formula(0, 10, 1.0, 5.0), 0.0);

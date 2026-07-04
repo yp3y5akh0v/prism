@@ -1,4 +1,4 @@
-use crate::point::PointStore;
+use super::point::PointStore;
 use rayon::prelude::*;
 
 /// Binary code store for Hamming distance pre-filtering.
@@ -12,6 +12,35 @@ pub struct BinaryStore {
 }
 
 impl BinaryStore {
+    /// Reassemble from persisted parts (the ANN segment decode path). The
+    /// SIGNS are persisted rather than re-derived from the seed, so a future
+    /// seed change can never silently desynchronize codes from queries.
+    pub fn from_parts(
+        codes: Vec<u64>,
+        code_words: usize,
+        signs: Vec<f32>,
+        block_size: usize,
+    ) -> Self {
+        Self {
+            codes,
+            code_words,
+            signs,
+            block_size,
+        }
+    }
+
+    pub fn codes(&self) -> &[u64] {
+        &self.codes
+    }
+
+    pub fn signs(&self) -> &[f32] {
+        &self.signs
+    }
+
+    pub fn block_size(&self) -> usize {
+        self.block_size
+    }
+
     /// Build binary codes: random sign flips (D) + Walsh-Hadamard in blocks of
     /// `largest_pow2_factor(dim)`. Fixed seed for build/query consistency.
     pub fn build(store: &PointStore) -> Self {
@@ -19,19 +48,35 @@ impl BinaryStore {
         let dim = store.dim;
         let code_words = dim.div_ceil(64);
         let block_size = largest_pow2_factor(dim);
-
-        use rand::{Rng, SeedableRng};
-        let mut rng = rand::rngs::StdRng::seed_from_u64(0x505249534D);
-        let signs: Vec<f32> = (0..dim)
-            .map(|_| if rng.gen_bool(0.5) { 1.0 } else { -1.0 })
-            .collect();
+        let signs = seeded_signs(dim);
 
         let mut codes = vec![0u64; n * code_words];
-        codes.par_chunks_mut(code_words).enumerate().for_each(|(i, chunk)| {
-            encode_vector(store.vector(i as u32), &signs, block_size, chunk);
-        });
+        codes
+            .par_chunks_mut(code_words)
+            .enumerate()
+            .for_each(|(i, chunk)| {
+                encode_vector(store.vector(i as u32), &signs, block_size, chunk);
+            });
 
-        Self { codes, code_words, signs, block_size }
+        Self {
+            codes,
+            code_words,
+            signs,
+            block_size,
+        }
+    }
+
+    /// A store with signs but no codes, for configs that never consult the
+    /// binary pre-filter (`binary_rerank == 0`). `encode_query` stays valid;
+    /// `code()` must not be reached (every caller is gated on the rerank
+    /// factor), so the per-point encoding pass and its memory are skipped.
+    pub fn empty(dim: usize) -> Self {
+        Self {
+            codes: Vec::new(),
+            code_words: dim.div_ceil(64),
+            signs: seeded_signs(dim),
+            block_size: largest_pow2_factor(dim),
+        }
     }
 
     /// Get the binary code (packed u64 words) for point id.
@@ -55,12 +100,19 @@ impl BinaryStore {
     }
 }
 
+/// Seed-fixed random sign flips shared by build and query encoding.
+fn seeded_signs(dim: usize) -> Vec<f32> {
+    use rand::{Rng, SeedableRng};
+    let mut rng = rand::rngs::StdRng::seed_from_u64(0x505249534D);
+    (0..dim)
+        .map(|_| if rng.gen_bool(0.5) { 1.0 } else { -1.0 })
+        .collect()
+}
+
 /// Apply HD rotation (sign flip + WHT) and extract signs into packed u64 code.
 fn encode_vector(vec: &[f32], signs: &[f32], block_size: usize, out: &mut [u64]) {
     let dim = vec.len();
-    let mut buf: Vec<f32> = vec.iter().enumerate()
-        .map(|(d, &v)| v * signs[d])
-        .collect();
+    let mut buf: Vec<f32> = vec.iter().enumerate().map(|(d, &v)| v * signs[d]).collect();
     for start in (0..dim).step_by(block_size) {
         walsh_hadamard(&mut buf[start..start + block_size]);
     }
@@ -72,7 +124,7 @@ fn encode_vector(vec: &[f32], signs: &[f32], block_size: usize, out: &mut [u64])
 }
 
 /// In-place Walsh-Hadamard transform on a slice of length 2^k.
-/// O(n log n) butterfly operations. Not normalized (unnecessary for sign extraction).
+/// Not normalized (irrelevant for sign extraction).
 fn walsh_hadamard(data: &mut [f32]) {
     let n = data.len();
     debug_assert!(n.is_power_of_two());
@@ -96,18 +148,19 @@ fn walsh_hadamard(data: &mut [f32]) {
 
 /// Largest power-of-2 factor of n (i.e., 2^(trailing zeros of n)).
 fn largest_pow2_factor(n: usize) -> usize {
-    if n == 0 { return 1; }
+    if n == 0 {
+        return 1;
+    }
     1 << n.trailing_zeros()
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::point::PointStore;
     use super::*;
-    use crate::point::PointStore;
 
     #[test]
     fn test_walsh_hadamard_identity() {
-        // WHT of [1, 0, 0, 0] = [1, 1, 1, 1]
         let mut data = vec![1.0, 0.0, 0.0, 0.0];
         walsh_hadamard(&mut data);
         assert_eq!(data, vec![1.0, 1.0, 1.0, 1.0]);
@@ -115,12 +168,10 @@ mod tests {
 
     #[test]
     fn test_walsh_hadamard_butterfly() {
-        // WHT of [1, 1] = [2, 0]
         let mut data = vec![1.0, 1.0];
         walsh_hadamard(&mut data);
         assert_eq!(data, vec![2.0, 0.0]);
 
-        // WHT of [1, -1] = [0, 2]
         let mut data = vec![1.0, -1.0];
         walsh_hadamard(&mut data);
         assert_eq!(data, vec![0.0, 2.0]);
@@ -128,16 +179,15 @@ mod tests {
 
     #[test]
     fn test_largest_pow2_factor() {
-        assert_eq!(largest_pow2_factor(384), 128); // 384 = 3 × 128
+        assert_eq!(largest_pow2_factor(384), 128);
         assert_eq!(largest_pow2_factor(128), 128);
         assert_eq!(largest_pow2_factor(256), 256);
-        assert_eq!(largest_pow2_factor(12), 4);    // 12 = 3 × 4
+        assert_eq!(largest_pow2_factor(12), 4);
         assert_eq!(largest_pow2_factor(1), 1);
     }
 
     #[test]
     fn test_binary_query_encoding() {
-        // Encoding the same vector should produce the same binary code
         let dim = 128;
         let p0: Vec<f32> = (0..dim).map(|i| (i as f32 * 0.1).sin()).collect();
         let mut vecs = Vec::with_capacity(dim);
@@ -153,13 +203,10 @@ mod tests {
 
     #[test]
     fn test_hamming_distance_ordering() {
-        use crate::distance;
+        use super::super::distance;
         let dim = 128;
-        // p0: smooth signal
         let p0: Vec<f32> = (0..dim).map(|i| (i as f32 + 1.0) / dim as f32).collect();
-        // p1: tiny perturbation of p0
         let p1: Vec<f32> = p0.iter().map(|&v| v + 0.001).collect();
-        // p2: negation of p0 (maximum angular distance)
         let p2: Vec<f32> = p0.iter().map(|&v| -v).collect();
 
         let mut vecs = Vec::with_capacity(3 * dim);
@@ -176,12 +223,14 @@ mod tests {
         let d2 = distance::hamming(&q, binary.code(2));
 
         assert_eq!(d0, 0, "same vector must have 0 Hamming distance");
-        assert!(d1 < d2, "close vector (d={d1}) must have smaller Hamming than opposite (d={d2})");
+        assert!(
+            d1 < d2,
+            "close vector (d={d1}) must have smaller Hamming than opposite (d={d2})"
+        );
     }
 
     #[test]
     fn test_binary_code_words() {
-        // 128d → 2 u64 words, 384d → 6 u64 words
         let store = PointStore::from_parts(vec![0.0; 128], 128, vec![vec![0]]);
         let binary = BinaryStore::build(&store);
         assert_eq!(binary.code_words(), 2);

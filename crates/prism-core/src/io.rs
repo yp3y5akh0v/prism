@@ -1,4 +1,4 @@
-use crate::point::PointStore;
+use super::point::PointStore;
 use byteorder::{LittleEndian, ReadBytesExt};
 use std::io::{self, BufReader, Read};
 use std::path::Path;
