@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Benchmarking harness for PRISM"
+publish = false
 
 [dependencies]
 prism-ann = { path = "../prism-core" }

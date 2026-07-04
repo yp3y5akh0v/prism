@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "PRISM: Partitioned Resilient Index for Similarity with Metadata"
+readme = "README.md"
+keywords = ["vector-search", "ann", "filtered-search", "nearest-neighbor", "embeddings"]
+categories = ["algorithms", "data-structures", "artificial-intelligence"]
 
 [dependencies]
 rand = { workspace = true }
