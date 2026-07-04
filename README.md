@@ -83,4 +83,5 @@ result_ids = idx.search(queries, q_indptr, q_tags, k=10, ef=50, nprobe=60)
 
 ## License
 
-Apache-2.0
+Licensed under either of Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+or MIT license ([LICENSE-MIT](LICENSE-MIT)) at your option.
