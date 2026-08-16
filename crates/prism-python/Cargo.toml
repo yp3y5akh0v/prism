@@ -13,6 +13,12 @@ publish = false
 name = "prism_ann"
 crate-type = ["cdylib"]
 
+# `extension-module` stops pyo3 linking libpython, which an import-time module
+# wants but a standalone test binary cannot resolve. Tests build without it.
+[features]
+default = ["extension-module"]
+extension-module = ["pyo3/extension-module"]
+
 [dependencies]
 prism-ann = { path = "../prism-core" }
 pyo3 = { workspace = true }
