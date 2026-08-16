@@ -1,12 +1,25 @@
 [build-system]
-requires = ["maturin>=1.0,<2.0"]
+requires = ["maturin>=1.12,<2.0"]
 build-backend = "maturin"
 
 [project]
 name = "prism-ann"
+description = "Filtered approximate nearest-neighbor vector search"
+readme = "README.md"
+authors = [{ name = "Yuriy Peysakhov" }]
 requires-python = ">=3.9"
+dependencies = ["numpy>=1.25"]
 dynamic = ["version"]
+license = "Apache-2.0"
+license-files = [
+    "LICENSE-APACHE",
+    "crates/prism-python/licenses/rust-numpy-BSD-2-Clause.txt",
+]
 
 [tool.maturin]
 manifest-path = "crates/prism-python/Cargo.toml"
 module-name = "prism_ann"
+
+[tool.maturin.sbom]
+rust = false
+auditwheel = false

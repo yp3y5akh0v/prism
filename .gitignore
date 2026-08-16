@@ -4,6 +4,12 @@ __pycache__/
 *.pyc
 .pytest_cache/
 datasets/
+/notes/
+/docs/
+dist/
+*.profraw
+.idea/
+.vscode/
 *.swp
 *.swo
 *~

@@ -11,6 +11,12 @@ readme = "README.md"
 keywords = ["vector-search", "ann", "filtered-search", "nearest-neighbor", "embeddings"]
 categories = ["algorithms", "data-structures", "artificial-intelligence"]
 
+[features]
+# Reference/portability path used to reproduce SQ8 SIMD performance deltas.
+# It changes work implementation only; candidate-distance semantics stay
+# scale-aware and identical to CPUs without AVX2+FMA.
+force-scalar-sq8 = []
+
 [dependencies]
 rand = { workspace = true }
 rayon = { workspace = true }

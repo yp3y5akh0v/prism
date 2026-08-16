@@ -1,87 +1,135 @@
-# PRISM
+<h1 align="center">PRISM</h1>
 
-Filtered vector search library with two algorithms:
+<p align="center">
+  <a href="https://crates.io/crates/prism-ann"><img src="https://badgen.net/crates/v/prism-ann" alt="crates.io"></a>
+  <a href="https://github.com/yp3y5akh0v/prism/actions/workflows/ci.yml"><img src="https://github.com/yp3y5akh0v/prism/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/yp3y5akh0v/prism#rust"><img src="https://img.shields.io/badge/rust-1.80%2B-orange" alt="Rust 1.80+"></a>
+  <a href="https://github.com/yp3y5akh0v/prism#python"><img src="https://img.shields.io/badge/python-3.9%2B-blue" alt="Python 3.9+"></a>
+  <a href="https://github.com/yp3y5akh0v/prism/blob/HEAD/LICENSE-APACHE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="License"></a>
+</p>
 
-- **Index** — partitions vectors by attribute values, builds local Vamana graphs per partition, and connects them with cross-partition edges and an expander overlay. For datasets with discrete label-based filters.
-- **IvfIndex** — two-level inverted index (K-means clusters × tag posting lists) with multi-query cell batching (MQCB). For large-scale datasets with high tag cardinality.
+Filtered vector search for Rust and Python. Filters are enforced exactly: every
+returned record satisfies the predicate.
 
-Both support L2, inner-product, and cosine distance, SQ8 quantization, and binary Hamming pre-filtering.
+Add records, then build. The index is immutable once built.
 
-## Build
+## Filter model
 
-Requires Rust 1.80+.
+`PrismIndex` gives each record one `u32` value per attribute. A filter is
+`IN (...)` within an attribute, combined across attributes with `AND`, so
+`attr_0 IN (3, 7) AND attr_2 IN (9)` selects on both.
 
-```
-cargo build --release -p prism-ann
-```
+`IvfIndex` uses a multi-valued tag model in which query tags are conjunctive.
+
+`PrismIndex` materializes one cell per populated attribute combination, so
+attribute cardinality drives index size.
 
 ## Python
 
-Requires Python 3.8+ and [maturin](https://github.com/PyO3/maturin).
+Requires Python 3.9+ and Rust 1.83+. Building from source requires
+[maturin](https://github.com/PyO3/maturin).
 
-```
+```console
 pip install maturin
-cd crates/prism-python
 maturin develop --release
 ```
 
-### Index (graph-based)
-
-For datasets with a fixed set of discrete attributes per vector.
-
 ```python
 import numpy as np
 import prism_ann
 
-idx = prism_ann.Index(dim=128, num_attributes=2)
+index = prism_ann.Index(dim=128, num_attributes=2, metric="cosine")
+vectors = np.random.default_rng(1).random((10_000, 128), dtype=np.float32)
+attributes = np.random.default_rng(2).integers(
+    0, 50, size=(10_000, 2), dtype=np.uint32
+)
+index.add(vectors, attributes)
+index.build()
 
-vectors = np.random.rand(10000, 128).astype(np.float32)
-attributes = np.random.randint(0, 50, size=(10000, 2)).astype(np.uint32)
-idx.add(vectors, attributes)
-idx.build()
+query = np.random.default_rng(3).random(128, dtype=np.float32)
+predicate = {"attr_0": [3, 7]}
 
-# Single query with filter: attr_0 must be 3 or 7
-query = np.random.rand(128).astype(np.float32)
-ids, dists = idx.search(query, k=10, filter={"attr_0": [3, 7]})
-
-# Batch search (parallel, releases GIL)
-queries = np.random.rand(100, 128).astype(np.float32)
-filters = [{"attr_0": [i % 50]} for i in range(100)]
-ids_batch, dists_batch = idx.batch_search(queries, k=10, ef=200, filters=filters)
+ids, distances = index.search(query, k=10, ef=200, filter=predicate)
+exact_ids, exact_distances = index.search_exact(query, k=10, filter=predicate)
 ```
 
-### IvfIndex (IVF + tag posting lists)
+`batch_search` takes queries as a 2D array and returns `(nq, k)` arrays. Pass
+`filter=` for one filter applied to every query, or `filters=` for a list of one
+filter per query (`None` in a slot means no filter). Rows with fewer than `k`
+eligible records are padded with the maximum `uint32` value as the ID and
+infinite distances.
 
-For large-scale tagged datasets with uint8 vectors. Metadata is passed as a scipy-style CSR matrix (indptr + indices).
+### Cluster x tag index
+
+`IvfIndex` accepts `uint8` or `float32` L2 vectors and scipy-style CSR tag
+metadata. Query dtype matches build dtype. An empty CSR row is an unfiltered
+query; nonempty rows require every listed tag.
 
 ```python
-import numpy as np
-import prism_ann
+n, dim, n_tags = 100_000, 192, 10_000
+rng = np.random.default_rng(4)
+vectors = rng.integers(0, 256, (n, dim), dtype=np.uint8)
 
-n, dim, n_tags = 1_000_000, 192, 50000
+indptr = np.arange(n + 1, dtype=np.int64)
+indices = rng.integers(0, n_tags, n, dtype=np.int32)
 
-idx = prism_ann.IvfIndex(n_clusters=4000, kmeans_iters=5)
+index = prism_ann.IvfIndex(n_clusters=400, kmeans_iters=5)
+index.build(vectors, indptr, indices, n_tags)
 
-vectors = np.random.randint(0, 256, (n, dim), dtype=np.uint8)
-
-# CSR metadata: each vector has 1-5 tags
-tags_per_vec = np.random.randint(1, 6, n)
-indptr = np.zeros(n + 1, dtype=np.int64)
-indptr[1:] = np.cumsum(tags_per_vec)
-indices = np.random.randint(0, n_tags, int(indptr[-1]), dtype=np.int32)
-
-idx.build(vectors, indptr, indices, n_tags)
-
-# Batch search: each query requires specific tags
-nq = 1000
-queries = np.random.randint(0, 256, (nq, dim), dtype=np.uint8)
-q_tags = np.random.randint(0, n_tags, nq, dtype=np.int32)
-q_indptr = np.arange(nq + 1, dtype=np.int64)
-
-result_ids = idx.search(queries, q_indptr, q_tags, k=10, ef=50, nprobe=60)
+queries = vectors[:100]
+query_indptr = np.arange(101, dtype=np.int64)
+query_tags = rng.integers(0, n_tags, 100, dtype=np.int32)
+result_ids = index.search(
+    queries, query_indptr, query_tags, k=10, ef=50, nprobe=60
+)
 ```
+
+## Rust
+
+Requires Rust 1.80+ for the core `prism-ann` crate.
+
+```console
+cargo build --release -p prism-ann
+cargo test -p prism-ann --all-targets
+```
+
+```rust
+use prism_ann::{Filter, PointStore, PrismConfig, PrismIndex, PrismResult};
+
+fn search(
+    vectors: Vec<f32>,
+    attributes: Vec<Vec<u32>>,
+    query: &[f32],
+) -> PrismResult<()> {
+    let store = PointStore::from_parts(vectors, 128, attributes)?;
+    let index = PrismIndex::build(store, PrismConfig::default())?;
+    let outcome = index.search(query, &Filter::eq(0, 3), 10, 200)?;
+
+    println!("results: {}", outcome.results.len());
+    println!("exact rescue: {}", outcome.diagnostics.used_exact_fallback);
+    Ok(())
+}
+```
+
+Errors are returned as `PrismError` through the `PrismResult<T>` alias. Rust
+results use internal reordered IDs; call `original_id` to recover
+insertion-order IDs. Python maps them automatically.
+
+## Search behavior
+
+Metrics are `"l2"`, `"cosine"`, and `"ip"` (alias `"inner_product"`). L2 is
+reported as squared L2. Inner product uses an exact filtered scan.
+
+`search` routes on filter selectivity, scanning or traversing the graph as the
+configured thresholds direct. It returns `min(k, eligible)` records: `ef` is
+promoted to at least `k`, and an exact eligible scan backs an underfilled
+approximate result. `search_exact` takes the exact path unconditionally.
+
+`build_seed` fixes construction: the same data, configuration and seed produce
+the same graph regardless of thread count.
+
+Graph construction and routing thresholds are configured on `PrismConfig`.
 
 ## License
 
-Licensed under either of Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
-or MIT license ([LICENSE-MIT](LICENSE-MIT)) at your option.
+[Apache-2.0](https://github.com/yp3y5akh0v/prism/blob/HEAD/LICENSE-APACHE)

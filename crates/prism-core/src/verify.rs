@@ -1,4 +1,9 @@
-//! Verification tests for PRISM paper lemmas and theorems.
+//! Empirical invariant and regression checks for PRISM graph construction.
+//!
+//! These randomized, finite fixtures are engineering tests, not formal proofs.
+//! In particular, production candidate beams, proximity weighting, and the
+//! deduplicated permutation overlay may not satisfy every assumption of the
+//! idealized statements named below.
 
 use crate::construct::{
     add_tuples, build_random_overlay, select_cross_neighbors, t_subsets, PrismConfig, PrismIndex,
@@ -10,7 +15,7 @@ use crate::point::PointStore;
 use rand::prelude::*;
 use std::collections::{HashSet, VecDeque};
 
-/// Build a random d-regular graph via d/2 random permutations (Friedman model).
+/// Build a deduplicated permutation overlay.
 fn random_regular_graph(n: usize, d: usize, rng: &mut impl Rng) -> Vec<Vec<u32>> {
     assert!(d >= 2 && d % 2 == 0);
     let half = d / 2;
@@ -54,7 +59,6 @@ fn spectral_gap(adj: &[Vec<u32>], iters: usize) -> f64 {
     let mut rng = StdRng::seed_from_u64(7);
     let mut x: Vec<f64> = (0..n).map(|_| rng.gen::<f64>() - 0.5).collect();
 
-    // Orthogonalize against all-ones/sqrt(n) and normalize
     let mean = x.iter().sum::<f64>() / n as f64;
     for xi in &mut x {
         *xi -= mean;
@@ -72,14 +76,11 @@ fn spectral_gap(adj: &[Vec<u32>], iters: usize) -> f64 {
 
     for _ in 0..iters {
         spmv(adj, &x, &mut y);
-        // Deflate: remove component along all-ones
         let mean = y.iter().sum::<f64>() / n as f64;
         for yi in &mut y {
             *yi -= mean;
         }
-        // Rayleigh quotient
         lambda = x.iter().zip(y.iter()).map(|(xi, yi)| xi * yi).sum::<f64>();
-        // Normalize
         let norm = y.iter().map(|yi| yi * yi).sum::<f64>().sqrt();
         if norm < 1e-15 {
             break;
@@ -185,7 +186,7 @@ fn enumerate_subsets(
 /// Convert CSR graph to adjacency lists.
 fn graph_to_adj(graph: &crate::graph::Graph) -> Vec<Vec<u32>> {
     (0..graph.n)
-        .map(|i| graph.neighbors(i as u32).to_vec())
+        .map(|i| graph.neighbors_unchecked(i as u32).to_vec())
         .collect()
 }
 
@@ -202,20 +203,21 @@ fn make_test_store(n: usize, dim: usize, cardinalities: &[usize]) -> PointStore 
             (0..n).map(|i| ((i / stride) % c) as u32).collect()
         })
         .collect();
-    PointStore::from_parts(vectors, dim, attrs)
+    PointStore::from_parts(vectors, dim, attrs).unwrap()
 }
 
-/// Bridge score formula (Definition 5.1).
+/// Bridge-score helper matching the production search formula.
 fn bridge_formula(matching: usize, total: usize, dist: f32, radius: f32) -> f32 {
     let neighbor_ratio = matching as f32 / total as f32;
     let proximity = 1.0 / (1.0 + dist / radius);
     neighbor_ratio * proximity
 }
 
-/// Lemma 2.7: Friedman spectral gap for random d-regular graphs.
-/// Claim: |lambda_2| <= 2*sqrt(d-1) + epsilon w.h.p.
+/// Fixture inspired by
+/// [Friedman's second-eigenvalue bound](https://arxiv.org/abs/cs/0405020); this
+/// generator is not uniformly `d`-regular, so it is not a theorem check.
 #[test]
-fn lemma_2_7_friedman_spectral_gap() {
+fn empirical_random_graph_spectral_gap_bound() {
     let n = 500;
     let mut rng = StdRng::seed_from_u64(7);
 
@@ -250,10 +252,9 @@ fn lemma_2_7_friedman_spectral_gap() {
     );
 }
 
-/// Lemma 2.8(i): Expander Mixing Lemma edge count lower bound.
-/// For subset S with |S|=sigma*n: e(G[S]) >= sigma*n/2 * (sigma*d - lambda).
+/// Finite empirical check of induced-edge counts in random subsets.
 #[test]
-fn lemma_2_8i_edge_count() {
+fn empirical_filtered_induced_edge_count() {
     let n = 500;
     let d = 8;
     let mut rng = StdRng::seed_from_u64(7);
@@ -280,15 +281,14 @@ fn lemma_2_8i_edge_count() {
     }
 }
 
-/// Lemma 2.8(ii): Giant component in induced subgraph.
-/// When sigma*d > (3/sqrt(2))*lambda, G[S] has component >= sigma*n - 2*lambda^2*n/(sigma*d^2).
+/// Finite empirical check for a giant component in a random induced subgraph.
 #[test]
-fn lemma_2_8ii_giant_component() {
+fn empirical_filtered_giant_component() {
     let n = 1000;
     let d = 8;
     let mut rng = StdRng::seed_from_u64(7);
     let adj = random_regular_graph(n, d, &mut rng);
-    // Use conservative lambda: inflate by 10% to account for power iteration underestimate
+    // Inflate by 10%: power iteration underestimates lambda.
     let lambda_raw = spectral_gap(&adj, 300);
     let lambda = lambda_raw * 1.1;
 
@@ -316,9 +316,9 @@ fn lemma_2_8ii_giant_component() {
     }
 }
 
-/// Theorem 6.3: PRISM filtered subgraph has a giant component (>50% of filtered points).
+/// Finite empirical filter-resilience check on a constructed PRISM graph.
 #[test]
-fn theorem_6_3_filter_resilience() {
+fn empirical_prism_filter_resilience() {
     let n = 500;
     let dim = 8;
     let store = make_test_store(n, dim, &[5, 5, 5]);
@@ -329,9 +329,12 @@ fn theorem_6_3_filter_resilience() {
         t: 2,
         alpha: 1.0,
         beam_width: 120,
+        // This fixture verifies graph resilience, so it must not take the
+        // small-index exact-scan construction path.
+        scan_threshold: 0,
         ..Default::default()
     };
-    let index = PrismIndex::build(store, config);
+    let index = PrismIndex::build(store, config).unwrap();
     let adj = graph_to_adj(&index.graph);
 
     for val in 0..5u32 {
@@ -349,20 +352,20 @@ fn theorem_6_3_filter_resilience() {
     }
 }
 
-/// Theorem 6.6 Case 1 (corrected): with t=1, every attribute value has >= 1 survivor.
-/// Original proof claimed >= floor(M_g/s_j) via pigeonhole, but pigeonhole only guarantees
-/// max bin >= ceil(n/k), not min bin >= floor(n/k). Corrected bound: >= 1.
+/// Finite fixture for the single-attribute survivor property.
+/// The supported bound is one survivor per value; a maximum-bin pigeonhole
+/// bound does not imply a larger minimum-bin count.
 /// With t=2, the greedy can produce 0 survivors for some values (2-tuple coverage
 /// doesn't imply 1-tuple coverage).
 #[test]
-fn theorem_6_6_case1_single_attr_survival() {
+fn empirical_single_attribute_survival() {
     let n = 200;
     let dim = 8;
     let store = make_test_store(n, dim, &[5, 5, 5]);
     let k = 3;
     let m_g = 12;
 
-    // Test with t=1 (covers all 1-tuples, guaranteeing every value is represented)
+    // t=1 covers all 1-tuples, so every value is represented.
     let config_t1 = PrismConfig {
         m_greedy: m_g,
         t: 1,
@@ -374,10 +377,15 @@ fn theorem_6_6_case1_single_attr_survival() {
 
     for _ in 0..50 {
         let p = rng.gen_range(0..n as u32);
-        let p_vec = store.vector(p);
+        let p_vec = store.vector_unchecked(p);
         let mut candidates: Vec<(u32, f32)> = (0..n as u32)
             .filter(|&q| q != p)
-            .map(|q| (q, crate::distance::l2_squared(p_vec, store.vector(q))))
+            .map(|q| {
+                (
+                    q,
+                    crate::distance::l2_squared(p_vec, store.vector_unchecked(q)),
+                )
+            })
             .collect();
         candidates.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
 
@@ -386,7 +394,10 @@ fn theorem_6_6_case1_single_attr_survival() {
 
         for j in 0..k {
             for v in 0..5u32 {
-                let survivors = selected.iter().filter(|&&q| store.attr(q, j) == v).count();
+                let survivors = selected
+                    .iter()
+                    .filter(|&&q| store.attr_unchecked(q, j) == v)
+                    .count();
                 assert!(
                     survivors >= 1,
                     "p={p}, attr={j}, val={v}: 0 survivors with t=1"
@@ -395,8 +406,8 @@ fn theorem_6_6_case1_single_attr_survival() {
         }
     }
 
-    // Also test with t=2: verify the paper's original floor(M_g/s_j) >= 2 does NOT hold.
-    // This documents the paper bug — the greedy can produce only 1 per value.
+    // Tuple coverage alone does not guarantee two representatives per scalar
+    // value; the greedy selector can produce one, and this records that limit.
     let config_t2 = PrismConfig {
         m_greedy: m_g,
         t: 2,
@@ -407,17 +418,25 @@ fn theorem_6_6_case1_single_attr_survival() {
     let mut found_violation = false;
     for trial in 0..200 {
         let p = (trial % n) as u32;
-        let p_vec = store.vector(p);
+        let p_vec = store.vector_unchecked(p);
         let mut candidates: Vec<(u32, f32)> = (0..n as u32)
             .filter(|&q| q != p)
-            .map(|q| (q, crate::distance::l2_squared(p_vec, store.vector(q))))
+            .map(|q| {
+                (
+                    q,
+                    crate::distance::l2_squared(p_vec, store.vector_unchecked(q)),
+                )
+            })
             .collect();
         candidates.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
 
         let selected = select_cross_neighbors(&store, &candidates, &config_t2, &subsets_t2);
         for j in 0..k {
             for v in 0..5u32 {
-                let count = selected.iter().filter(|&&q| store.attr(q, j) == v).count();
+                let count = selected
+                    .iter()
+                    .filter(|&&q| store.attr_unchecked(q, j) == v)
+                    .count();
                 if count < 2 {
                     found_violation = true;
                 }
@@ -433,9 +452,9 @@ fn theorem_6_6_case1_single_attr_survival() {
     );
 }
 
-/// Theorem 6.6 Case 2: With M_g >= CAN bound, every strength-t filter has >= 1 survivor.
+/// Finite covering-array survivor fixture.
 #[test]
-fn theorem_6_6_case2_covering_array() {
+fn empirical_covering_array_survival() {
     let n = 300;
     let dim = 8;
     let store = make_test_store(n, dim, &[3, 3, 3]);
@@ -465,10 +484,15 @@ fn theorem_6_6_case2_covering_array() {
     let mut rng = StdRng::seed_from_u64(7);
     for _ in 0..50 {
         let p = rng.gen_range(0..n as u32);
-        let p_vec = store.vector(p);
+        let p_vec = store.vector_unchecked(p);
         let mut candidates: Vec<(u32, f32)> = (0..n as u32)
             .filter(|&q| q != p)
-            .map(|q| (q, crate::distance::l2_squared(p_vec, store.vector(q))))
+            .map(|q| {
+                (
+                    q,
+                    crate::distance::l2_squared(p_vec, store.vector_unchecked(q)),
+                )
+            })
             .collect();
         candidates.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
 
@@ -485,9 +509,9 @@ fn theorem_6_6_case2_covering_array() {
     }
 }
 
-/// Theorem 4.1: Greedy coverage >= (1-1/e) * optimal.
+/// Finite greedy-coverage fixture compared with the submodular bound.
 #[test]
-fn theorem_4_1_coverage_guarantee() {
+fn greedy_coverage_fixture_meets_submodular_bound() {
     let n = 50;
     let dim = 4;
     let store = make_test_store(n, dim, &[3, 3, 3]);
@@ -506,7 +530,7 @@ fn theorem_4_1_coverage_guarantee() {
 
     for _ in 0..20 {
         let p = rng.gen_range(0..n as u32);
-        let p_vec = store.vector(p);
+        let p_vec = store.vector_unchecked(p);
 
         let mut cand_ids: Vec<u32> = (0..n as u32).filter(|&q| q != p).collect();
         cand_ids.shuffle(&mut rng);
@@ -514,7 +538,12 @@ fn theorem_4_1_coverage_guarantee() {
 
         let mut candidates: Vec<(u32, f32)> = cand_ids
             .iter()
-            .map(|&q| (q, crate::distance::l2_squared(p_vec, store.vector(q))))
+            .map(|&q| {
+                (
+                    q,
+                    crate::distance::l2_squared(p_vec, store.vector_unchecked(q)),
+                )
+            })
             .collect();
         candidates.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
 
@@ -532,9 +561,9 @@ fn theorem_4_1_coverage_guarantee() {
     }
 }
 
-/// Lemma 3.6: f_t (tuple coverage) is monotone and submodular.
+/// Finite checks of monotonicity and submodularity for tuple coverage.
 #[test]
-fn lemma_3_6_submodularity() {
+fn tuple_coverage_is_monotone_and_submodular_on_fixtures() {
     let n = 30;
     let dim = 4;
     let store = make_test_store(n, dim, &[3, 4, 3]);
@@ -568,7 +597,7 @@ fn lemma_3_6_submodularity() {
         // Monotonicity
         assert!(f_a_q >= f_a, "trial {trial}: monotonicity failed");
 
-        // Submodularity: marginal gain decreases with larger set
+        // Submodularity
         let gain_a = f_a_q - f_a;
         let gain_b = f_b_q - f_b;
         assert!(
@@ -578,13 +607,11 @@ fn lemma_3_6_submodularity() {
     }
 }
 
-/// Definition 5.1: Bridge score formula verification.
+/// Bridge-score formula properties on fixed examples.
 #[test]
-fn definition_5_1_bridge_score() {
-    // More matching neighbors -> higher score
+fn bridge_score_formula_properties() {
     assert!(bridge_formula(8, 10, 1.0, 5.0) > bridge_formula(2, 10, 1.0, 5.0));
 
-    // Closer distance -> higher score
     assert!(bridge_formula(5, 10, 1.0, 5.0) > bridge_formula(5, 10, 10.0, 5.0));
 
     // Exact: (3/6) * (1/(1 + 2/4)) = 0.5 * 2/3 = 1/3
@@ -594,10 +621,8 @@ fn definition_5_1_bridge_score() {
         "expected 1/3, got {score}"
     );
 
-    // Zero matching -> zero score
     assert_eq!(bridge_formula(0, 10, 1.0, 5.0), 0.0);
 
-    // Zero distance -> proximity = 1.0
     let score = bridge_formula(5, 10, 0.0, 5.0);
     assert!((score - 0.5).abs() < 1e-6, "expected 0.5, got {score}");
 }
@@ -615,12 +640,15 @@ fn graph_structure_invariants() {
         t: 2,
         alpha: 1.0,
         beam_width: 120,
+        // Keep this graph-structure test independent of the cost-aware
+        // exact-scan threshold.
+        scan_threshold: 0,
         ..Default::default()
     };
-    let index = PrismIndex::build(store, config);
+    let index = PrismIndex::build(store, config).unwrap();
 
     for i in 0..n as u32 {
-        let neighbors = index.graph.neighbors(i);
+        let neighbors = index.graph.neighbors_unchecked(i);
         assert!(!neighbors.contains(&i), "self-loop at node {i}");
         for &j in neighbors {
             assert!(j < n as u32, "invalid neighbor {j} for node {i}");
@@ -629,9 +657,9 @@ fn graph_structure_invariants() {
             assert!(w[0] < w[1], "neighbors not sorted/deduped at {i}");
         }
         assert!(
-            index.graph.degree(i) >= 2,
+            index.graph.degree_unchecked(i) >= 2,
             "degree too low at {i}: {}",
-            index.graph.degree(i)
+            index.graph.degree_unchecked(i)
         );
     }
 
@@ -645,23 +673,26 @@ fn graph_structure_invariants() {
 fn random_overlay_regularity() {
     let n = 500;
     let d = 8;
-    let mut adj = AdjBuilder::new(n);
+    let mut adj = AdjBuilder::new(n).unwrap();
     build_random_overlay(n, d, &mut adj);
-    let graph = adj.build();
+    let graph = adj.build().unwrap();
 
     for i in 0..n as u32 {
-        let deg = graph.degree(i);
+        let deg = graph.degree_unchecked(i);
         assert!(
             deg >= d - 3 && deg <= d + 3,
             "node {i}: degree {deg}, expected ~{d}"
         );
-        assert!(!graph.neighbors(i).contains(&i), "self-loop at {i}");
+        assert!(
+            !graph.neighbors_unchecked(i).contains(&i),
+            "self-loop at {i}"
+        );
     }
 }
 
-/// Proposition 3.2: filter_cells returns exactly the compatible leaves.
+/// `filter_cells` agrees with brute-force predicate evaluation on this fixture.
 #[test]
-fn proposition_3_2_filter_pruning() {
+fn filter_cell_postings_match_bruteforce_on_fixture() {
     let n = 200;
     let dim = 4;
     let store = make_test_store(n, dim, &[4, 3, 5]);
@@ -674,7 +705,7 @@ fn proposition_3_2_filter_pruning() {
         beam_width: 30,
         ..Default::default()
     };
-    let index = PrismIndex::build(store, config);
+    let index = PrismIndex::build(store, config).unwrap();
 
     let filters = vec![
         Filter::eq(0, 2),
@@ -684,13 +715,12 @@ fn proposition_3_2_filter_pruning() {
     ];
 
     for filter in &filters {
-        let cell_indices = index.tree.filter_cells(filter.constraints());
+        let cell_indices = index.tree.filter_cells(filter.constraints()).unwrap();
         let cell_points: HashSet<u32> = cell_indices
             .iter()
             .flat_map(|&ci| index.tree.cells[ci].point_ids.iter().copied())
             .collect();
 
-        // No false positives
         for &p in &cell_points {
             assert!(
                 filter.matches(&index.store, p),
@@ -698,7 +728,6 @@ fn proposition_3_2_filter_pruning() {
             );
         }
 
-        // No false negatives
         for p in 0..n as u32 {
             if filter.matches(&index.store, p) {
                 assert!(
