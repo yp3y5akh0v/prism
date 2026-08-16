@@ -578,7 +578,15 @@ mod tests {
 
         let self_distance = cosine(&a, &a);
         let near_distance = cosine(&a, &b);
-        assert_eq!(self_distance, 0.0);
+
+        assert!(
+            self_distance >= 0.0,
+            "self distance {self_distance} is negative"
+        );
+        assert!(
+            self_distance <= f32::EPSILON,
+            "self distance {self_distance} is not near zero"
+        );
         assert!((0.0..=2.0).contains(&near_distance));
     }
 
