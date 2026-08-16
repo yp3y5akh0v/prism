@@ -7,7 +7,7 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "Filtered approximate nearest-neighbor vector search"
-readme = "README.md"
+readme = "../../README.md"
 keywords = ["vector-search", "ann", "filtered-search", "nearest-neighbor", "embeddings"]
 categories = ["algorithms", "data-structures", "artificial-intelligence"]
 
